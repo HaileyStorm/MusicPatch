@@ -1,3 +1,5 @@
+import random
+
 import tensorflow as tf
 from tensorflow import keras
 import numpy as np
@@ -29,13 +31,14 @@ wandb.login()
 
 
 # build generator of subimages of Spectrogram, sliding across time
-def inputs_generator(t_start, t_end, S, dt_, img_height, img_width):
+def inputs_generator(t_start, t_end, S, dt_):
+    img_width, img_height = S.shape[-2:]
     t = t_start
     while t <= t_end:
         clip_tensor = []
         top_frames = []
 
-        for j in range(t - dt_*(config.l - 1), t + 1, dt_):
+        for j in range(t - dt_*(config["l"] - 1), t + 1, dt_):
             sub_img = np.transpose(S[:img_height, j:j+img_width])
             clip_tensor.append(sub_img.astype(np.float32))  # pixel values are normalized to [0,1]
         clip_tensor = np.array(clip_tensor)
@@ -50,29 +53,33 @@ def inputs_generator(t_start, t_end, S, dt_, img_height, img_width):
 
 
 # Function to create the dataset
-def create_dataset(img_width, img_height, len_T, S_mag):
-    t_start = int((config.l - 1))  # first frame index in the valid range
+def create_dataset(len_T, S_mag):
+    img_width, img_height = S_mag.shape[-2:]
+    t_start = int((config["l"] - 1))  # first frame index in the valid range
     t_end = int(len_T - img_width - 1)  # last frame index in the valid range, assuming images start at t=0 and go to t=T-1
     samples = np.floor(t_end - t_start + 1)
-    steps_per_epoch_tr = int(np.floor(samples / config.batch_size)) - 1 # number of batches
+    steps_per_epoch_tr = int(np.floor(samples / config["batch_size"])) - 1 # number of batches
+
+    # Normalize
+    S_mag = (S_mag - np.min(S_mag)) / (np.max(S_mag) - np.min(S_mag))
 
     ds_train = tf.data.Dataset.from_generator(
         inputs_generator,
-        args=[t_start, t_end, S_mag, 1, img_height, img_width],
+        args=[t_start, t_end, S_mag, 1],
         output_types=((tf.float32, tf.float32), tf.float32),
-        output_shapes=(((config.l, img_width, img_height), (2, img_width, img_height)), ()))
+        output_shapes=(((config["l"], img_width, img_height), (2, img_width, img_height)), ()))
 
     ds_train = ds_train.shuffle(int(samples * 0.7),
                                 # turn off shuffle if you are training on a subset of the data for hyperparameter tuning and plan to visualize performance on the first steps_per_epoch_tuning batches of the TRAINING set
                                 reshuffle_each_iteration=False)  # the argument into shuffle is the buffer size. this can be smaller than the number of samples, especially when using larger datasets
-    ds_train = ds_train.batch(config.batch_size, drop_remainder=True)  # insufficient data error was thrown without adding the .repeat(). I added the +1 dataset at the end for good measure
-    ds_train = ds_train.repeat(config.epochs + 1)
+    ds_train = ds_train.batch(config["batch_size"], drop_remainder=True)  # insufficient data error was thrown without adding the .repeat(). I added the +1 dataset at the end for good measure
+    ds_train = ds_train.repeat(config["epochs"] + 1)
     return ds_train, steps_per_epoch_tr
 
 
 def create_aggregated_dataset(window_duration, spectrograms_directory):
-    # Aggregates the spectrograms from all songs into a single dataset
-    S_mag_aggregated = []
+    # Initialize list to store all sub-images
+    all_sub_images = []
 
     # Collect all matching spectrogram files for the given window_duration
     matching_files = [f for f in os.listdir(spectrograms_directory) if f.endswith(f"_{window_duration}s.pkl")]
@@ -80,20 +87,28 @@ def create_aggregated_dataset(window_duration, spectrograms_directory):
     for file in matching_files:
         with open(os.path.join(spectrograms_directory, file), "rb") as f:
             S_mag = pickle.load(f)
-            S_mag_aggregated.append(S_mag)
 
-    # Stack all the spectrograms
-    S_mag_aggregated = np.concatenate(S_mag_aggregated, axis=1)
+        # Normalize
+        S_mag = (S_mag - np.min(S_mag)) / (np.max(S_mag) - np.min(S_mag))
 
-    # Normalize
-    S_mag_aggregated = (S_mag_aggregated - np.min(S_mag_aggregated)) / (
-                np.max(S_mag_aggregated) - np.min(S_mag_aggregated))
+        # Infer T, img_width, and img_height
+        T = S_mag.shape[1]
+        img_width, img_height = S_mag.shape[-2:]
 
-    # Infer T, img_width, and img_height
-    T = S_mag_aggregated.shape[1]
-    img_width, img_height = S_mag_aggregated.shape[-2:]
+        # Slide window across the spectrogram and generate sub-images
+        for t in range(T - img_width):
+            sub_img = S_mag[:, t:t + img_width]
+            all_sub_images.append(sub_img)
 
-    return create_dataset(img_width, img_height, len(T), S_mag_aggregated)
+    # Shuffle the list of sub-images
+    random.shuffle(all_sub_images)
+
+    # Convert list to TensorFlow dataset
+    ds_train = tf.data.Dataset.from_tensor_slices(all_sub_images)
+    ds_train = ds_train.batch(config["batch_size"], drop_remainder=True)
+    ds_train = ds_train.repeat(config["epochs"] + 1)
+
+    return ds_train, len(all_sub_images) // config["batch_size"]
 
 
 # Short-Window Encoder
@@ -201,7 +216,7 @@ class Add_model_loss(keras.layers.Layer):
         neg_cosine_theta = -K.sum(VSegment[:, 0:-1, :]*VSegment[:, 1:, :], axis=-1)  # take dot product of each pair of consecutive normalized velocity vectors= cos(theta)--> *-1 makes opposing vectors have a value -cos(theta)=1 ie high loss
         curvature_loss = K.mean(neg_cosine_theta, axis=1)  # shape:(batch size,).  mean (across time) of -cos similarity between each consecutive pair of velocity vectors. encourages embeddings with lower curvature
 
-        loss = config.alpha*forcasting_loss + config.beta*reconstruction_loss + config.gamma*off_center_loss + config.delta*curvature_loss
+        loss = config["alpha"]*forcasting_loss + config["beta"]*reconstruction_loss + config["gamma*off_center_loss"] + config["delta"]*curvature_loss
         return loss, off_center_loss, reconstruction_loss, forcasting_loss, curvature_loss
 
     def call(self, layer_inputs):
@@ -216,7 +231,7 @@ class Add_model_loss(keras.layers.Layer):
         return loss  # we dont need to return vhat again since this layer wont be used during inference. it doesnt matter what is returned here as long as its a scalar
 
 
-def process_single_duration(duration, spectrograms_folder, is_tuning=False):
+def process_single_duration(duration, spectrograms_folder, config, is_tuning=False):
     if is_tuning:
         # Load S_mag_crop from the pickled object
         spectrogram_file = f"{spectrograms_folder}/{duration}s.pkl"
@@ -232,7 +247,7 @@ def process_single_duration(duration, spectrograms_folder, is_tuning=False):
         S_mag = (S_mag - np.min(S_mag)) / (np.max(S_mag) - np.min(S_mag))
 
         # Create dataset
-        ds_train, steps_per_epoch_tr = create_dataset(img_width, img_height, len(T), S_mag)
+        ds_train, steps_per_epoch_tr = create_dataset(len(T), S_mag)
     else:
         ds_train, steps_per_epoch_tr = create_aggregated_dataset(duration, spectrograms_directory)
 
@@ -252,7 +267,7 @@ def process_single_duration(duration, spectrograms_folder, is_tuning=False):
             raise ValueError(f"Base model for duration {duration} not found!")
     else:
         # Input branch 1: prediction from frame sequence
-        clip_tensor_shape = (config.l,) + img_size  # (l tensor slices, time-steps, freq)
+        clip_tensor_shape = (config["l"],) + img_size  # (l tensor slices, time-steps, freq)
         top_frames_shape = (2,) + img_size  # (2 tensor slices, time-steps, freq)
         input_clip_tensor = Input(shape=clip_tensor_shape, name='input_clip_tensor')
         z = TimeDistributed(Encoder)(input_clip_tensor)
@@ -289,7 +304,7 @@ def process_single_duration(duration, spectrograms_folder, is_tuning=False):
     # Fit the model
     model.fit(ds_train,
               steps_per_epoch=steps_per_epoch_tr,
-              epochs=config.epochs,
+              epochs=config["epochs"],
               verbose=2,
               callbacks=[WandbCallback(), model_checkpoint_callback])
 
@@ -315,11 +330,11 @@ if len(sys.argv) > 1:
 
     # Set wandb config
     config = vars["wandb_config_tune"]
-    wandb.init(entity='your-wandb', project='Deep Audio Embedding', group='Vivaldi', name="FineTune", config=config)
 
     # Loop over each window duration and fine-tune the corresponding model
     for duration in window_durations:
-        process_single_duration(duration, spectrograms_folder, True)
+        wandb.init(project='Deep Audio Embedding', group='Vivaldi', name=f"FineTune_{duration}", config=config)
+        process_single_duration(duration, spectrograms_folder, config, True)
 
 else:
     # No song specified, process all songs in the 'Audio/train/spectrograms' directory
@@ -328,11 +343,11 @@ else:
 
     # Set wandb config
     config = vars["wandb_config_base"]
-    wandb.init(entity='your-wandb', project='Deep Audio Embedding', group='Vivaldi', name="BaseModel", config=config)
 
     # Loop over each window duration and train the base model
     for duration in window_durations:
-        process_single_duration(duration, spectrograms_directory, False)
+        wandb.init(project='Deep Audio Embedding', group='Vivaldi', name=f"BaseModel_{duration}", config=config)
+        process_single_duration(duration, spectrograms_directory, config, False)
 
 # Save variables
 variables.write_variables_to_json(vars)

@@ -1,3 +1,1 @@
-The way the aggregate dataset prep is done won't work. Passing the aggregated spectrum dimensions to the single spectrum dataset generator will produce the wrong result.
-
 Full-song shouldn't get a base model (thus we removed 210s from duration list) and should be trained from scratch.
