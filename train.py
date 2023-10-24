@@ -78,8 +78,9 @@ def create_dataset(len_T, S_mag):
 
 
 def create_aggregated_dataset(window_duration, spectrograms_directory):
-    # Initialize list to store all sub-images
-    all_sub_images = []
+    # Initialize list to store all clip_tensors and top_frames
+    all_clip_tensors = []
+    all_top_frames = []
 
     # Collect all matching spectrogram files for the given window_duration
     matching_files = [f for f in os.listdir(spectrograms_directory) if f.endswith(f"_{window_duration}s.pkl")]
@@ -95,21 +96,31 @@ def create_aggregated_dataset(window_duration, spectrograms_directory):
         # Infer T, img_width, and img_height
         T = S_mag.shape[1]
         img_width, img_height = S_mag.shape[-2:]
+        print((img_width, img_height))
 
-        # Slide window across the spectrogram and generate sub-images
-        for t in range(T - img_width):
-            sub_img = S_mag[:, t:t + img_width]
-            all_sub_images.append(sub_img)
+        # Slide window across the spectrogram and generate clip_tensors and top_frames
+        for t in range(T - img_width - 2):  # Adjusted to allow room for top_frames
+            clip_tensor = S_mag[:, t:t + img_width]
+            top_frames = S_mag[:, t + img_width:t + img_width + 2]
+            all_clip_tensors.append(clip_tensor)
+            all_top_frames.append(top_frames)
 
-    # Shuffle the list of sub-images
-    random.shuffle(all_sub_images)
+    # Shuffle the data
+    combined = list(zip(all_clip_tensors, all_top_frames))
+    random.shuffle(combined)
+    all_clip_tensors[:], all_top_frames[:] = zip(*combined)
 
-    # Convert list to TensorFlow dataset
-    ds_train = tf.data.Dataset.from_tensor_slices(all_sub_images)
+    # Convert lists to TensorFlow dataset
+    ds_train = tf.data.Dataset.from_tensor_slices((all_clip_tensors, all_top_frames))
+
+    # Adjust the structure of the dataset to match what Keras expects
+    ds_train = ds_train.map(lambda clip_tensor, top_frames: ((clip_tensor, top_frames), 0))
+
     ds_train = ds_train.batch(config["batch_size"], drop_remainder=True)
     ds_train = ds_train.repeat(config["epochs"] + 1)
 
-    return ds_train, len(all_sub_images) // config["batch_size"], (img_width, img_height)
+    return ds_train, len(all_clip_tensors) // config["batch_size"], (img_width, img_height)
+
 
 
 # Short-Window Encoder
@@ -217,7 +228,7 @@ class Add_model_loss(keras.layers.Layer):
         neg_cosine_theta = -K.sum(VSegment[:, 0:-1, :]*VSegment[:, 1:, :], axis=-1)  # take dot product of each pair of consecutive normalized velocity vectors= cos(theta)--> *-1 makes opposing vectors have a value -cos(theta)=1 ie high loss
         curvature_loss = K.mean(neg_cosine_theta, axis=1)  # shape:(batch size,).  mean (across time) of -cos similarity between each consecutive pair of velocity vectors. encourages embeddings with lower curvature
 
-        loss = config["alpha"]*forcasting_loss + config["beta"]*reconstruction_loss + config["gamma*off_center_loss"] + config["delta"]*curvature_loss
+        loss = config["alpha"]*forcasting_loss + config["beta"]*reconstruction_loss + config["gamma"]*off_center_loss + config["delta"]*curvature_loss
         return loss, off_center_loss, reconstruction_loss, forcasting_loss, curvature_loss
 
     def call(self, layer_inputs):
