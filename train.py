@@ -83,6 +83,7 @@ def create_aggregated_dataset(window_duration, spectrograms_directory):
 
     # Collect all matching spectrogram files for the given window_duration
     matching_files = [f for f in os.listdir(spectrograms_directory) if f.endswith(f"_{window_duration}s.pkl")]
+    img_width, img_height = 0, 0
 
     for file in matching_files:
         with open(os.path.join(spectrograms_directory, file), "rb") as f:
@@ -108,7 +109,7 @@ def create_aggregated_dataset(window_duration, spectrograms_directory):
     ds_train = ds_train.batch(config["batch_size"], drop_remainder=True)
     ds_train = ds_train.repeat(config["epochs"] + 1)
 
-    return ds_train, len(all_sub_images) // config["batch_size"]
+    return ds_train, len(all_sub_images) // config["batch_size"], (img_width, img_height)
 
 
 # Short-Window Encoder
@@ -249,7 +250,7 @@ def process_single_duration(duration, spectrograms_folder, config, is_tuning=Fal
         # Create dataset
         ds_train, steps_per_epoch_tr = create_dataset(len(T), S_mag)
     else:
-        ds_train, steps_per_epoch_tr = create_aggregated_dataset(duration, spectrograms_directory)
+        ds_train, steps_per_epoch_tr, img_size = create_aggregated_dataset(duration, spectrograms_directory)
 
     # Decide which model to use based on window_duration
     if duration < model_cutoff:
