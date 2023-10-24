@@ -1,0 +1,3 @@
+What to do about model dimensions for full-song? need to override use of img_size (which is oassed in for the encoders). not sure that will work. maybe full-song doesn't get a base model and it's trained from scratch.
+
+What's more, passing in img_size at all for encoders is an issue given the way the agreegated dataset thing works (no single img_size available). A) Is this gonna be an issue with sample rates giving different image sizes for same window duration, giving different image sizes? B) If not, need to determine img_size based on duration rather than pulling it from S_Mag
