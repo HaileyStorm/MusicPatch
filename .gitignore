@@ -1,0 +1,5 @@
+/Audio/train/spectrograms/
+*.wav
+*.pkl
+*.tf
+/.idea/
