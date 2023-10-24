@@ -31,25 +31,25 @@ wandb.login()
 
 
 # build generator of subimages of Spectrogram, sliding across time
-def inputs_generator(t_start, t_end, S, dt_):
+def inputs_generator(t_start, t_end, S):
     img_width, img_height = S.shape[-2:]
     t = t_start
     while t <= t_end:
         clip_tensor = []
         top_frames = []
 
-        for j in range(t - dt_*(config["l"] - 1), t + 1, dt_):
+        for j in range(t - (config["l"] - 1), t + 1, 1):
             sub_img = np.transpose(S[:img_height, j:j+img_width])
             clip_tensor.append(sub_img.astype(np.float32))  # pixel values are normalized to [0,1]
         clip_tensor = np.array(clip_tensor)
 
-        for j in range(t, t + 2*dt_, dt_):
+        for j in range(t, t + 2, 1):
             sub_img = np.transpose(S[:img_height, j:j + img_width])
             top_frames.append(sub_img.astype(np.float32))
         top_frames = np.array(top_frames)
 
         yield ((clip_tensor, top_frames), 0)  # 0 represents the target output of the model. the metric in .compile is computed using this. the addloss layer outputs the loss itself just for convienience.
-        t += dt_
+        t += 1
 
 
 # Function to create the dataset
@@ -65,7 +65,7 @@ def create_dataset(len_T, S_mag):
 
     ds_train = tf.data.Dataset.from_generator(
         inputs_generator,
-        args=[t_start, t_end, S_mag, 1],
+        args=[t_start, t_end, S_mag],
         output_types=((tf.float32, tf.float32), tf.float32),
         output_shapes=(((config["l"], img_width, img_height), (2, img_width, img_height)), ()))
 
@@ -96,14 +96,38 @@ def create_aggregated_dataset(window_duration, spectrograms_directory):
         # Infer T, img_width, and img_height
         T = S_mag.shape[1]
         img_width, img_height = S_mag.shape[-2:]
-        print((img_width, img_height))
+        #print((img_width, img_height))
 
         # Slide window across the spectrogram and generate clip_tensors and top_frames
-        for t in range(T - img_width - 2):  # Adjusted to allow room for top_frames
-            clip_tensor = S_mag[:, t:t + img_width]
-            top_frames = S_mag[:, t + img_width:t + img_width + 2]
+        for t in range(T - img_width - 3):
+            clip_tensor_slices = []
+            for j in range(t, t + config["l"]):
+                slice_ = S_mag[:, j:j + img_width]
+                if slice_.shape[1] != img_width:
+                    continue  # Skip this slice if it's not the correct width
+                #print(slice_.shape)
+                clip_tensor_slices.append(slice_)
+            clip_tensor = np.array(clip_tensor_slices)
+            if True: #t + img_width + 2 <= T:  # Make sure we don't exceed the bounds
+                top_frames_slices = []
+                for j in range(t, t + 2):
+                    slice_ = S_mag[:, j:j + img_width]
+                    top_frames_slices.append(slice_)
+                top_frames = np.array(top_frames_slices)
+            else:
+                continue  # Skip this iteration if there's no room for top_frames
+            #print("clip_tensor shape:", clip_tensor.shape)
+            #print("top_frames shape:", top_frames.shape)
+            #print(f"t: {t}, t + img_width: {t + img_width}, t + img_width + 2: {t + img_width + 2}, S_mag time dimension: {S_mag.shape[1]}")
+
             all_clip_tensors.append(clip_tensor)
             all_top_frames.append(top_frames)
+
+    clip_shapes = [tensor.shape for tensor in all_clip_tensors]
+    top_shapes = [tensor.shape for tensor in all_top_frames]
+
+    print("Unique clip tensor shapes:", set(clip_shapes))
+    print("Unique top frame shapes:", set(top_shapes))
 
     # Shuffle the data
     combined = list(zip(all_clip_tensors, all_top_frames))
